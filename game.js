@@ -195,13 +195,8 @@ function renderDropdown(results) {
     const name = document.createElement("span");
     name.textContent = movie.title;
 
-    const year = document.createElement("span");
-    year.className = "result-year";
-    year.textContent = (movie.release_date || "").slice(0, 4);
-
     li.appendChild(img);
     li.appendChild(name);
-    li.appendChild(year);
 
     li.addEventListener("click", () => {
       selectedMovie = {
