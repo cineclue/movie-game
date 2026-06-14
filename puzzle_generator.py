@@ -27,6 +27,8 @@ HINT_MIN_VOTES        = 5000
 # Actors used as clues must be recognisable (TMDB person popularity)
 MIN_ACTOR_POPULARITY  = 6
 
+SUPERHERO_KEYWORD_ID = 9715  # TMDB keyword: "superhero"
+
 CLUE_ORDER = ["YEAR", "GENRE", "ACTOR", "ACTOR", "DIRECTOR"]
 
 # ─── TMDB helpers ─────────────────────────────────────────────────────────────
@@ -50,7 +52,11 @@ def get_credits(movie_id):
     return tmdb(f"/movie/{movie_id}/credits")
 
 def get_movie_details(movie_id):
-    return tmdb(f"/movie/{movie_id}", append_to_response="credits")
+    return tmdb(f"/movie/{movie_id}", append_to_response="credits,keywords")
+
+def is_superhero(details):
+    kw_ids = {kw["id"] for kw in details.get("keywords", {}).get("keywords", [])}
+    return SUPERHERO_KEYWORD_ID in kw_ids
 
 # ─── Popular movie pool ────────────────────────────────────────────────────────
 
@@ -63,6 +69,7 @@ def fetch_popular_pool(pages=10):
                     vote_count_gte=MIN_VOTE_COUNT,
                     popularity_gte=MIN_POPULARITY,
                     with_original_language="en",
+                    without_keywords=SUPERHERO_KEYWORD_ID,
                     page=page)
         movies.extend(data.get("results", []))
     return movies
@@ -104,10 +111,14 @@ def find_director_clue(movie_id, answer_id, credits):
     if not directed:
         return None
     directed.sort(key=lambda m: m.get("vote_count", 0), reverse=True)
-    m = directed[0]
-    return {"category": "DIRECTOR", "connection": director["name"],
-            "hint_tmdb_id": m["id"],
-            "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
+    for m in directed[:10]:
+        kw_data = tmdb(f"/movie/{m['id']}/keywords")
+        kw_ids = {kw["id"] for kw in kw_data.get("keywords", [])}
+        if SUPERHERO_KEYWORD_ID not in kw_ids:
+            return {"category": "DIRECTOR", "connection": director["name"],
+                    "hint_tmdb_id": m["id"],
+                    "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
+    return None
 
 def find_genre_clue(answer_id, genres):
     if not genres:
@@ -120,6 +131,7 @@ def find_genre_clue(answer_id, genres):
                 sort_by="vote_count.desc",
                 vote_count_gte=HINT_MIN_VOTES,
                 with_original_language="en",
+                without_keywords=SUPERHERO_KEYWORD_ID,
                 page=1)
     candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
     if not candidates:
@@ -138,6 +150,7 @@ def find_year_clue(answer_id, release_date):
                 sort_by="vote_count.desc",
                 vote_count_gte=HINT_MIN_VOTES,
                 with_original_language="en",
+                without_keywords=SUPERHERO_KEYWORD_ID,
                 page=1)
     candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
     if not candidates:
@@ -160,6 +173,7 @@ def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
                     sort_by="vote_count.desc",
                     vote_count_gte=HINT_MIN_VOTES,
                     with_original_language="en",
+                    without_keywords=SUPERHERO_KEYWORD_ID,
                     page=1)
         candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
         if candidates:
@@ -181,6 +195,9 @@ def build_puzzle(movie, used_hint_ids=None, force=False):
 
     # Skip sequels / franchise entries (bypass with force=True for manual additions)
     if not force and details.get("belongs_to_collection"):
+        return None
+
+    if is_superhero(details):
         return None
 
     credits = details.get("credits", {})
@@ -240,21 +257,10 @@ def upsert_puzzle(date_str, puzzle_data):
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
-    target_date = datetime.date.today() + datetime.timedelta(days=1)
-    date_str    = target_date.isoformat()
-
+def generate_for_date(date_str, used_ids, pool, current_year):
+    """Try to generate and save a puzzle for date_str. Returns True on success."""
     print(f"Generating puzzle for {date_str}…")
-
-    if puzzle_exists(date_str):
-        print(f"[SKIP] Puzzle for {date_str} already exists — not overwriting.")
-        return
-
-    used_ids = fetch_used_ids()
-    pool     = fetch_popular_pool(pages=15)
     random.shuffle(pool)
-
-    current_year = str(datetime.date.today().year)
     for movie in pool:
         if movie["id"] in used_ids:
             continue
@@ -268,9 +274,31 @@ def main():
             continue
         if puzzle:
             upsert_puzzle(date_str, puzzle)
-            return
+            used_ids.add(movie["id"])
+            return True
+    print(f"[FAIL] Could not find a suitable movie for {date_str}.")
+    return False
 
-    print("[FAIL] Could not find a suitable movie. Try expanding the pool.")
+
+def main():
+    today        = datetime.date.today()
+    current_year = str(today.year)
+    used_ids     = fetch_used_ids()
+    pool         = fetch_popular_pool(pages=15)
+
+    # Fill any gaps from the past 3 days before generating tomorrow
+    for offset in range(-3, 0):
+        d = today + datetime.timedelta(days=offset)
+        if not puzzle_exists(d.isoformat()):
+            print(f"[CATCH-UP] Missing puzzle detected for {d} — filling in.")
+            generate_for_date(d.isoformat(), used_ids, pool, current_year)
+
+    # Generate tomorrow's puzzle
+    tomorrow = today + datetime.timedelta(days=1)
+    if puzzle_exists(tomorrow.isoformat()):
+        print(f"[SKIP] Puzzle for {tomorrow} already exists — not overwriting.")
+        return
+    generate_for_date(tomorrow.isoformat(), used_ids, pool, current_year)
 
 if __name__ == "__main__":
     main()
