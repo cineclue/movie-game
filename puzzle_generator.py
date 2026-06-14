@@ -24,8 +24,8 @@ MIN_VOTE_COUNT  = 10000
 MIN_POPULARITY  = 30
 # Clue hint movies must still be recognisable
 HINT_MIN_VOTES        = 5000
-# Actors used as clues must be recognisable (TMDB person popularity)
-MIN_ACTOR_POPULARITY  = 6
+# Actors used as clues must have appeared in 2+ well-voted movies
+ACTOR_MIN_KNOWN_MOVIES = 2
 
 SUPERHERO_KEYWORD_ID = 9715  # TMDB keyword: "superhero"
 
@@ -160,13 +160,17 @@ def find_year_clue(answer_id, release_date):
             "hint_tmdb_id": m["id"],
             "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
 
+def actor_is_recognizable(actor_id):
+    """Return True if actor has appeared in 2+ movies with MIN_VOTE_COUNT votes."""
+    data = tmdb(f"/person/{actor_id}/movie_credits")
+    big = [m for m in data.get("cast", []) if m.get("vote_count", 0) >= MIN_VOTE_COUNT]
+    return len(big) >= ACTOR_MIN_KNOWN_MOVIES
+
 def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
     cast = [c for c in credits.get("cast", []) if c["id"] not in exclude_ids]
     cast.sort(key=lambda c: c.get("order", 99))
-    # lead_only=True: top-billed actor; lead_only=False: supporting actors 2-6
-    # Wider ranges compensate for the popularity filter below
     pool = cast[:3] if lead_only else cast[1:8]
-    pool = [c for c in pool if c.get("popularity", 0) >= MIN_ACTOR_POPULARITY]
+    pool = [c for c in pool if actor_is_recognizable(c["id"])]
     for actor in pool:
         data = tmdb("/discover/movie",
                     with_cast=actor["id"],
