@@ -25,7 +25,7 @@ MIN_POPULARITY  = 30
 # Clue hint movies must still be recognisable
 HINT_MIN_VOTES        = 5000
 # Actors used as clues must have appeared in 2+ well-voted movies
-ACTOR_MIN_KNOWN_MOVIES = 2
+ACTOR_MIN_KNOWN_MOVIES = 4
 
 SUPERHERO_KEYWORD_ID = 9715  # TMDB keyword: "superhero"
 
