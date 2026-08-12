@@ -20,8 +20,7 @@ TMDB_BASE     = "https://api.themoviedb.org/3"
 TMDB_IMG      = "https://image.tmdb.org/t/p/w342"
 
 # Popularity thresholds — keeps answers well-known
-MIN_VOTE_COUNT  = 10000
-MIN_POPULARITY  = 30
+MIN_VOTE_COUNT  = 8000
 # Clue hint movies must still be recognisable
 HINT_MIN_VOTES        = 5000
 # Actors used as clues must have appeared in 2+ well-voted movies
@@ -36,8 +35,7 @@ CLUE_ORDER = ["YEAR", "GENRE", "ACTOR", "ACTOR", "DIRECTOR"]
 def tmdb(path, **params):
     # TMDB discover uses dot notation for comparisons (e.g. vote_count.gte)
     for underscore, dot in [("vote_count_gte", "vote_count.gte"),
-                             ("vote_average_gte", "vote_average.gte"),
-                             ("popularity_gte", "popularity.gte")]:
+                             ("vote_average_gte", "vote_average.gte")]:
         if underscore in params:
             params[dot] = params.pop(underscore)
     params["api_key"] = TMDB_KEY
@@ -67,7 +65,6 @@ def fetch_popular_pool(pages=10):
         data = tmdb("/discover/movie",
                     sort_by="popularity.desc",
                     vote_count_gte=MIN_VOTE_COUNT,
-                    popularity_gte=MIN_POPULARITY,
                     with_original_language="en",
                     without_keywords=SUPERHERO_KEYWORD_ID,
                     page=page)
@@ -162,7 +159,7 @@ def find_year_clue(answer_id, release_date):
                 without_keywords=SUPERHERO_KEYWORD_ID,
                 page=1)
     candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
-    standalone = [m for m in candidates[:10] if not hint_is_franchise(m["id"])]
+    standalone = [m for m in candidates[:15] if not hint_is_franchise(m["id"])]
     if not standalone:
         return None
     m = random.choice(standalone)
@@ -190,7 +187,7 @@ def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
     cast = [c for c in credits.get("cast", []) if c["id"] not in exclude_ids]
     cast.sort(key=lambda c: c.get("order", 99))
     # lead pool is cast[:3]; start supporting pool after it so they don't compete for the same actor
-    pool = cast[:3] if lead_only else cast[3:8]
+    pool = cast[:3] if lead_only else cast[3:10]
     pool = [c for c in pool if actor_is_recognizable(c["id"])]
     for actor in pool:
         data = tmdb("/discover/movie",
@@ -201,7 +198,7 @@ def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
                     without_keywords=SUPERHERO_KEYWORD_ID,
                     page=1)
         candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
-        for m in candidates[:8]:
+        for m in candidates[:12]:
             billing = actor_billing_in_movie(actor["id"], m["id"])
             if billing is not None and billing < MAX_HINT_BILLING and not hint_is_franchise(m["id"]):
                 exclude_ids.add(actor["id"])
@@ -310,7 +307,7 @@ def main():
     today        = datetime.date.today()
     current_year = str(today.year)
     used_ids     = fetch_used_ids()
-    pool         = fetch_popular_pool(pages=15)
+    pool         = fetch_popular_pool(pages=25)
 
     # Fill any gaps from the past 3 days before generating tomorrow
     for offset in range(-3, 0):
