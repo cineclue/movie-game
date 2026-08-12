@@ -145,9 +145,11 @@ def find_year_clue(answer_id, release_date):
     if not release_date:
         return None
     year = release_date[:4]
+    # Sort by revenue (not vote_count) so the hint is genuinely famous, not just heavily-voted.
+    # Safe to compare raw revenue here since candidates are all from the same year (no inflation skew).
     data = tmdb("/discover/movie",
                 primary_release_year=year,
-                sort_by="vote_count.desc",
+                sort_by="revenue.desc",
                 vote_count_gte=HINT_MIN_VOTES,
                 with_original_language="en",
                 without_keywords=SUPERHERO_KEYWORD_ID,
