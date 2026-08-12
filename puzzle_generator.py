@@ -98,6 +98,14 @@ def fetch_used_ids():
 
 # ─── Clue builders ─────────────────────────────────────────────────────────────
 
+def hint_is_franchise(movie_id):
+    """Hint movies should be standalone, like the answer — not sequels/franchise entries."""
+    d = tmdb(f"/movie/{movie_id}", append_to_response="keywords")
+    if d.get("belongs_to_collection"):
+        return True
+    kw_ids = {kw["id"] for kw in d.get("keywords", {}).get("keywords", [])}
+    return SUPERHERO_KEYWORD_ID in kw_ids
+
 def find_director_clue(movie_id, answer_id, credits):
     directors = [c for c in credits.get("crew", []) if c["job"] == "Director"]
     if not directors:
@@ -112,9 +120,7 @@ def find_director_clue(movie_id, answer_id, credits):
         return None
     directed.sort(key=lambda m: m.get("vote_count", 0), reverse=True)
     for m in directed[:10]:
-        kw_data = tmdb(f"/movie/{m['id']}/keywords")
-        kw_ids = {kw["id"] for kw in kw_data.get("keywords", [])}
-        if SUPERHERO_KEYWORD_ID not in kw_ids:
+        if not hint_is_franchise(m["id"]):
             return {"category": "DIRECTOR", "connection": director["name"],
                     "hint_tmdb_id": m["id"],
                     "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
@@ -134,9 +140,10 @@ def find_genre_clue(answer_id, genres):
                 without_keywords=SUPERHERO_KEYWORD_ID,
                 page=1)
     candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
-    if not candidates:
+    standalone = [m for m in candidates[:20] if not hint_is_franchise(m["id"])]
+    if not standalone:
         return None
-    m = random.choice(candidates[:20])
+    m = random.choice(standalone)
     return {"category": "GENRE", "connection": clue_genre["name"],
             "hint_tmdb_id": m["id"],
             "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
@@ -155,9 +162,10 @@ def find_year_clue(answer_id, release_date):
                 without_keywords=SUPERHERO_KEYWORD_ID,
                 page=1)
     candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
-    if not candidates:
+    standalone = [m for m in candidates[:10] if not hint_is_franchise(m["id"])]
+    if not standalone:
         return None
-    m = random.choice(candidates[:10])
+    m = random.choice(standalone)
     return {"category": "YEAR", "connection": year,
             "hint_tmdb_id": m["id"],
             "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
@@ -195,7 +203,7 @@ def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
         candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
         for m in candidates[:8]:
             billing = actor_billing_in_movie(actor["id"], m["id"])
-            if billing is not None and billing < MAX_HINT_BILLING:
+            if billing is not None and billing < MAX_HINT_BILLING and not hint_is_franchise(m["id"]):
                 exclude_ids.add(actor["id"])
                 return {"category": "ACTOR", "connection": actor["name"],
                         "hint_tmdb_id": m["id"],
