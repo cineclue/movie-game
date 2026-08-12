@@ -25,7 +25,7 @@ MIN_POPULARITY  = 30
 # Clue hint movies must still be recognisable
 HINT_MIN_VOTES        = 5000
 # Actors used as clues must have appeared in 2+ well-voted movies
-ACTOR_MIN_KNOWN_MOVIES = 4
+ACTOR_MIN_KNOWN_MOVIES = 2
 
 SUPERHERO_KEYWORD_ID = 9715  # TMDB keyword: "superhero"
 
@@ -166,10 +166,21 @@ def actor_is_recognizable(actor_id):
     big = [m for m in data.get("cast", []) if m.get("vote_count", 0) >= MIN_VOTE_COUNT]
     return len(big) >= ACTOR_MIN_KNOWN_MOVIES
 
+MAX_HINT_BILLING = 10  # actor must be billed in top N of the hint movie's cast
+
+def actor_billing_in_movie(actor_id, movie_id):
+    """Return the cast order (0-indexed) of actor in movie, or None if not found."""
+    credits = tmdb(f"/movie/{movie_id}/credits")
+    for member in credits.get("cast", []):
+        if member["id"] == actor_id:
+            return member.get("order", 999)
+    return None
+
 def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
     cast = [c for c in credits.get("cast", []) if c["id"] not in exclude_ids]
     cast.sort(key=lambda c: c.get("order", 99))
-    pool = cast[:3] if lead_only else cast[1:8]
+    # lead pool is cast[:3]; start supporting pool after it so they don't compete for the same actor
+    pool = cast[:3] if lead_only else cast[3:8]
     pool = [c for c in pool if actor_is_recognizable(c["id"])]
     for actor in pool:
         data = tmdb("/discover/movie",
@@ -180,12 +191,13 @@ def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
                     without_keywords=SUPERHERO_KEYWORD_ID,
                     page=1)
         candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
-        if candidates:
-            m = random.choice(candidates[:8])
-            exclude_ids.add(actor["id"])
-            return {"category": "ACTOR", "connection": actor["name"],
-                    "hint_tmdb_id": m["id"],
-                    "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
+        for m in candidates[:8]:
+            billing = actor_billing_in_movie(actor["id"], m["id"])
+            if billing is not None and billing < MAX_HINT_BILLING:
+                exclude_ids.add(actor["id"])
+                return {"category": "ACTOR", "connection": actor["name"],
+                        "hint_tmdb_id": m["id"],
+                        "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
     return None
 
 # ─── Build full puzzle ─────────────────────────────────────────────────────────
