@@ -4,6 +4,10 @@ Daily puzzle generator for CineClue.
 Picks a popular movie, builds 5 clues (Director, Genre, Year, Actor, Actor),
 and upserts the result into Supabase `daily_puzzles`.
 
+A puzzle must be produced every run. generate_for_date() tries progressively
+looser filter tiers (GENERATION_TIERS) until one succeeds, so a thin pool of
+recognizable candidates for a given day never results in a skipped puzzle.
+
 Run manually:  python puzzle_generator.py
 Runs via GitHub Actions: .github/workflows/daily_puzzle.yml
 """
@@ -19,16 +23,43 @@ SUPABASE_KEY  = os.environ["SUPABASE_SERVICE_KEY"]  # service role key for write
 TMDB_BASE     = "https://api.themoviedb.org/3"
 TMDB_IMG      = "https://image.tmdb.org/t/p/w342"
 
-# Popularity thresholds — keeps answers well-known
-MIN_VOTE_COUNT  = 8000
-# Clue hint movies must still be recognisable
-HINT_MIN_VOTES        = 5000
-# Actors used as clues must have appeared in 2+ well-voted movies
-ACTOR_MIN_KNOWN_MOVIES = 2
-
 SUPERHERO_KEYWORD_ID = 9715  # TMDB keyword: "superhero"
 
 CLUE_ORDER = ["YEAR", "GENRE", "ACTOR", "ACTOR", "DIRECTOR"]
+
+# ─── Filter tiers ───────────────────────────────────────────────────────────────
+# Tier 1 is the normal, well-known-movies-only bar. Each subsequent tier loosens
+# vote/recognizability thresholds and eventually allows franchise/superhero/
+# current-year movies, so the final tier will match almost anything TMDB has.
+DEFAULT_SETTINGS = dict(
+    min_vote_count=8000,          # answer + pool popularity floor
+    hint_min_votes=5000,          # clue hint movies must clear this
+    actor_min_known_movies=2,     # actor must appear in 2+ well-voted movies
+    director_min_votes=100,       # director's other films must clear this
+    max_hint_billing=10,          # actor must be top-N billed in the hint movie
+    exclude_superhero=True,
+    exclude_franchise=True,
+    exclude_current_year=True,
+    pool_pages=25,
+)
+
+GENERATION_TIERS = [
+    DEFAULT_SETTINGS,
+    dict(DEFAULT_SETTINGS, min_vote_count=4000, hint_min_votes=2000,
+         actor_min_known_movies=2, director_min_votes=50, max_hint_billing=15,
+         pool_pages=25),
+    dict(DEFAULT_SETTINGS, min_vote_count=1500, hint_min_votes=800,
+         actor_min_known_movies=1, director_min_votes=20, max_hint_billing=20,
+         exclude_superhero=False, exclude_franchise=False, pool_pages=30),
+    dict(DEFAULT_SETTINGS, min_vote_count=300, hint_min_votes=150,
+         actor_min_known_movies=1, director_min_votes=5, max_hint_billing=30,
+         exclude_superhero=False, exclude_franchise=False,
+         exclude_current_year=False, pool_pages=30),
+    dict(DEFAULT_SETTINGS, min_vote_count=0, hint_min_votes=0,
+         actor_min_known_movies=0, director_min_votes=0, max_hint_billing=9999,
+         exclude_superhero=False, exclude_franchise=False,
+         exclude_current_year=False, pool_pages=40),
+]
 
 # ─── TMDB helpers ─────────────────────────────────────────────────────────────
 
@@ -58,16 +89,17 @@ def is_superhero(details):
 
 # ─── Popular movie pool ────────────────────────────────────────────────────────
 
-def fetch_popular_pool(pages=10):
+def fetch_popular_pool(pages=10, settings=DEFAULT_SETTINGS):
     """Fetch a pool of popular movies suitable as answers."""
     movies = []
     for page in range(1, pages + 1):
-        data = tmdb("/discover/movie",
-                    sort_by="popularity.desc",
-                    vote_count_gte=MIN_VOTE_COUNT,
-                    with_original_language="en",
-                    without_keywords=SUPERHERO_KEYWORD_ID,
-                    page=page)
+        params = dict(sort_by="popularity.desc",
+                      vote_count_gte=settings["min_vote_count"],
+                      with_original_language="en",
+                      page=page)
+        if settings.get("exclude_superhero", True):
+            params["without_keywords"] = SUPERHERO_KEYWORD_ID
+        data = tmdb("/discover/movie", **params)
         movies.extend(data.get("results", []))
     return movies
 
@@ -95,15 +127,22 @@ def fetch_used_ids():
 
 # ─── Clue builders ─────────────────────────────────────────────────────────────
 
-def hint_is_franchise(movie_id):
+def hint_is_franchise(movie_id, settings=DEFAULT_SETTINGS):
     """Hint movies should be standalone, like the answer — not sequels/franchise entries."""
+    exclude_franchise = settings.get("exclude_franchise", True)
+    exclude_superhero = settings.get("exclude_superhero", True)
+    if not exclude_franchise and not exclude_superhero:
+        return False
     d = tmdb(f"/movie/{movie_id}", append_to_response="keywords")
-    if d.get("belongs_to_collection"):
+    if exclude_franchise and d.get("belongs_to_collection"):
         return True
-    kw_ids = {kw["id"] for kw in d.get("keywords", {}).get("keywords", [])}
-    return SUPERHERO_KEYWORD_ID in kw_ids
+    if exclude_superhero:
+        kw_ids = {kw["id"] for kw in d.get("keywords", {}).get("keywords", [])}
+        if SUPERHERO_KEYWORD_ID in kw_ids:
+            return True
+    return False
 
-def find_director_clue(movie_id, answer_id, credits):
+def find_director_clue(movie_id, answer_id, credits, settings=DEFAULT_SETTINGS):
     directors = [c for c in credits.get("crew", []) if c["job"] == "Director"]
     if not directors:
         return None
@@ -112,32 +151,33 @@ def find_director_clue(movie_id, answer_id, credits):
     data = tmdb(f"/person/{director['id']}/movie_credits")
     directed = [m for m in data.get("crew", [])
                 if m.get("job") == "Director" and m["id"] != answer_id
-                and m.get("vote_count", 0) >= 100]
+                and m.get("vote_count", 0) >= settings["director_min_votes"]]
     if not directed:
         return None
     directed.sort(key=lambda m: m.get("vote_count", 0), reverse=True)
     for m in directed[:10]:
-        if not hint_is_franchise(m["id"]):
+        if not hint_is_franchise(m["id"], settings):
             return {"category": "DIRECTOR", "connection": director["name"],
                     "hint_tmdb_id": m["id"],
                     "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
     return None
 
-def find_genre_clue(answer_id, genres):
+def find_genre_clue(answer_id, genres, settings=DEFAULT_SETTINGS):
     if not genres:
         return None
     # Skip Drama (18) — too broad/common to be a useful clue; fall back only if no other genre
     BROAD_GENRE_IDS = {18}
     clue_genre = next((g for g in genres if g["id"] not in BROAD_GENRE_IDS), genres[0])
-    data = tmdb("/discover/movie",
-                with_genres=clue_genre["id"],
-                sort_by="vote_count.desc",
-                vote_count_gte=HINT_MIN_VOTES,
-                with_original_language="en",
-                without_keywords=SUPERHERO_KEYWORD_ID,
-                page=1)
+    params = dict(with_genres=clue_genre["id"],
+                  sort_by="vote_count.desc",
+                  vote_count_gte=settings["hint_min_votes"],
+                  with_original_language="en",
+                  page=1)
+    if settings.get("exclude_superhero", True):
+        params["without_keywords"] = SUPERHERO_KEYWORD_ID
+    data = tmdb("/discover/movie", **params)
     candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
-    standalone = [m for m in candidates[:20] if not hint_is_franchise(m["id"])]
+    standalone = [m for m in candidates[:20] if not hint_is_franchise(m["id"], settings)]
     if not standalone:
         return None
     m = random.choice(standalone)
@@ -145,21 +185,22 @@ def find_genre_clue(answer_id, genres):
             "hint_tmdb_id": m["id"],
             "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
 
-def find_year_clue(answer_id, release_date):
+def find_year_clue(answer_id, release_date, settings=DEFAULT_SETTINGS):
     if not release_date:
         return None
     year = release_date[:4]
     # Sort by revenue (not vote_count) so the hint is genuinely famous, not just heavily-voted.
     # Safe to compare raw revenue here since candidates are all from the same year (no inflation skew).
-    data = tmdb("/discover/movie",
-                primary_release_year=year,
-                sort_by="revenue.desc",
-                vote_count_gte=HINT_MIN_VOTES,
-                with_original_language="en",
-                without_keywords=SUPERHERO_KEYWORD_ID,
-                page=1)
+    params = dict(primary_release_year=year,
+                  sort_by="revenue.desc",
+                  vote_count_gte=settings["hint_min_votes"],
+                  with_original_language="en",
+                  page=1)
+    if settings.get("exclude_superhero", True):
+        params["without_keywords"] = SUPERHERO_KEYWORD_ID
+    data = tmdb("/discover/movie", **params)
     candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
-    standalone = [m for m in candidates[:15] if not hint_is_franchise(m["id"])]
+    standalone = [m for m in candidates[:15] if not hint_is_franchise(m["id"], settings)]
     if not standalone:
         return None
     m = random.choice(standalone)
@@ -167,13 +208,14 @@ def find_year_clue(answer_id, release_date):
             "hint_tmdb_id": m["id"],
             "hint_title": m["title"], "poster_url": poster_url(m.get("poster_path"))}
 
-def actor_is_recognizable(actor_id):
-    """Return True if actor has appeared in 2+ movies with MIN_VOTE_COUNT votes."""
+def actor_is_recognizable(actor_id, settings=DEFAULT_SETTINGS):
+    """Return True if actor has appeared in enough movies with min_vote_count votes."""
+    needed = settings["actor_min_known_movies"]
+    if needed <= 0:
+        return True
     data = tmdb(f"/person/{actor_id}/movie_credits")
-    big = [m for m in data.get("cast", []) if m.get("vote_count", 0) >= MIN_VOTE_COUNT]
-    return len(big) >= ACTOR_MIN_KNOWN_MOVIES
-
-MAX_HINT_BILLING = 10  # actor must be billed in top N of the hint movie's cast
+    big = [m for m in data.get("cast", []) if m.get("vote_count", 0) >= settings["min_vote_count"]]
+    return len(big) >= needed
 
 def actor_billing_in_movie(actor_id, movie_id):
     """Return the cast order (0-indexed) of actor in movie, or None if not found."""
@@ -183,24 +225,26 @@ def actor_billing_in_movie(actor_id, movie_id):
             return member.get("order", 999)
     return None
 
-def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
+def find_actor_clue(answer_id, credits, exclude_ids, settings=DEFAULT_SETTINGS, lead_only=False):
     cast = [c for c in credits.get("cast", []) if c["id"] not in exclude_ids]
     cast.sort(key=lambda c: c.get("order", 99))
     # lead pool is cast[:3]; start supporting pool after it so they don't compete for the same actor
     pool = cast[:3] if lead_only else cast[3:10]
-    pool = [c for c in pool if actor_is_recognizable(c["id"])]
+    pool = [c for c in pool if actor_is_recognizable(c["id"], settings)]
     for actor in pool:
-        data = tmdb("/discover/movie",
-                    with_cast=actor["id"],
-                    sort_by="vote_count.desc",
-                    vote_count_gte=HINT_MIN_VOTES,
-                    with_original_language="en",
-                    without_keywords=SUPERHERO_KEYWORD_ID,
-                    page=1)
+        params = dict(with_cast=actor["id"],
+                      sort_by="vote_count.desc",
+                      vote_count_gte=settings["hint_min_votes"],
+                      with_original_language="en",
+                      page=1)
+        if settings.get("exclude_superhero", True):
+            params["without_keywords"] = SUPERHERO_KEYWORD_ID
+        data = tmdb("/discover/movie", **params)
         candidates = [m for m in data.get("results", []) if m["id"] != answer_id]
         for m in candidates[:12]:
             billing = actor_billing_in_movie(actor["id"], m["id"])
-            if billing is not None and billing < MAX_HINT_BILLING and not hint_is_franchise(m["id"]):
+            if billing is not None and billing < settings["max_hint_billing"] \
+                    and not hint_is_franchise(m["id"], settings):
                 exclude_ids.add(actor["id"])
                 return {"category": "ACTOR", "connection": actor["name"],
                         "hint_tmdb_id": m["id"],
@@ -209,18 +253,19 @@ def find_actor_clue(answer_id, credits, exclude_ids, lead_only=False):
 
 # ─── Build full puzzle ─────────────────────────────────────────────────────────
 
-def build_puzzle(movie, used_hint_ids=None, force=False):
+def build_puzzle(movie, used_hint_ids=None, force=False, settings=DEFAULT_SETTINGS):
     """Build a 5-clue puzzle for `movie`. Returns None if clues can't be filled."""
     if used_hint_ids is None:
         used_hint_ids = set()
 
     details = get_movie_details(movie["id"])
 
-    # Skip sequels / franchise entries (bypass with force=True for manual additions)
-    if not force and details.get("belongs_to_collection"):
+    # Skip sequels / franchise entries (bypass with force=True for manual additions,
+    # or automatically once a generation tier sets exclude_franchise=False)
+    if not force and settings.get("exclude_franchise", True) and details.get("belongs_to_collection"):
         return None
 
-    if is_superhero(details):
+    if settings.get("exclude_superhero", True) and is_superhero(details):
         return None
 
     credits = details.get("credits", {})
@@ -230,11 +275,11 @@ def build_puzzle(movie, used_hint_ids=None, force=False):
     clues = []
 
     builders = [
-        lambda: find_year_clue(movie["id"], movie.get("release_date")),
-        lambda: find_genre_clue(movie["id"], genres),
-        lambda: find_actor_clue(movie["id"], credits, used_actor_ids),           # supporting
-        lambda: find_actor_clue(movie["id"], credits, used_actor_ids, lead_only=True),  # lead
-        lambda: find_director_clue(movie["id"], movie["id"], credits),
+        lambda: find_year_clue(movie["id"], movie.get("release_date"), settings),
+        lambda: find_genre_clue(movie["id"], genres, settings),
+        lambda: find_actor_clue(movie["id"], credits, used_actor_ids, settings),           # supporting
+        lambda: find_actor_clue(movie["id"], credits, used_actor_ids, settings, lead_only=True),  # lead
+        lambda: find_director_clue(movie["id"], movie["id"], credits, settings),
     ]
 
     for build in builders:
@@ -280,26 +325,35 @@ def upsert_puzzle(date_str, puzzle_data):
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
-def generate_for_date(date_str, used_ids, pool, current_year):
-    """Try to generate and save a puzzle for date_str. Returns True on success."""
+def generate_for_date(date_str, used_ids, current_year):
+    """Generate and save a puzzle for date_str, trying GENERATION_TIERS in order.
+    Each tier loosens vote/recognizability filters; the last tier allows almost
+    any movie, so this only returns False if TMDB itself is unreachable or the
+    entire pool has already been used as an answer."""
     print(f"Generating puzzle for {date_str}…")
-    random.shuffle(pool)
-    for movie in pool:
-        if movie["id"] in used_ids:
-            continue
-        if (movie.get("release_date") or "")[:4] == current_year:
-            continue
-        print(f"  Trying: {movie['title']} ({movie.get('release_date','')[:4]})")
-        try:
-            puzzle = build_puzzle(movie)
-        except Exception as e:
-            print(f"    [skip] ({e})")
-            continue
-        if puzzle:
-            upsert_puzzle(date_str, puzzle)
-            used_ids.add(movie["id"])
-            return True
-    print(f"[FAIL] Could not find a suitable movie for {date_str}.")
+    for tier_num, settings in enumerate(GENERATION_TIERS, start=1):
+        pool = fetch_popular_pool(pages=settings["pool_pages"], settings=settings)
+        random.shuffle(pool)
+        print(f"  [tier {tier_num}/{len(GENERATION_TIERS)}] "
+              f"min_votes={settings['min_vote_count']} hint_votes={settings['hint_min_votes']} "
+              f"pool={len(pool)}")
+        for movie in pool:
+            if movie["id"] in used_ids:
+                continue
+            if settings["exclude_current_year"] and (movie.get("release_date") or "")[:4] == current_year:
+                continue
+            print(f"    Trying: {movie['title']} ({movie.get('release_date','')[:4]})")
+            try:
+                puzzle = build_puzzle(movie, force=not settings["exclude_franchise"], settings=settings)
+            except Exception as e:
+                print(f"      [skip] ({e})")
+                continue
+            if puzzle:
+                upsert_puzzle(date_str, puzzle)
+                used_ids.add(movie["id"])
+                return True
+        print(f"  [tier {tier_num} exhausted] no suitable movie found, loosening further…")
+    print(f"[FAIL] Exhausted every tier for {date_str} — no candidates left at all.")
     return False
 
 
@@ -307,21 +361,20 @@ def main():
     today        = datetime.date.today()
     current_year = str(today.year)
     used_ids     = fetch_used_ids()
-    pool         = fetch_popular_pool(pages=25)
 
-    # Fill any gaps from the past 3 days before generating tomorrow
-    for offset in range(-3, 0):
+    # Fill any gaps from the past 3 days, and today itself, before generating tomorrow
+    for offset in range(-3, 1):
         d = today + datetime.timedelta(days=offset)
         if not puzzle_exists(d.isoformat()):
             print(f"[CATCH-UP] Missing puzzle detected for {d} — filling in.")
-            generate_for_date(d.isoformat(), used_ids, pool, current_year)
+            generate_for_date(d.isoformat(), used_ids, current_year)
 
     # Generate tomorrow's puzzle
     tomorrow = today + datetime.timedelta(days=1)
     if puzzle_exists(tomorrow.isoformat()):
         print(f"[SKIP] Puzzle for {tomorrow} already exists — not overwriting.")
         return
-    generate_for_date(tomorrow.isoformat(), used_ids, pool, current_year)
+    generate_for_date(tomorrow.isoformat(), used_ids, current_year)
 
 if __name__ == "__main__":
     main()
