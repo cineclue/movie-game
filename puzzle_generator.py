@@ -361,20 +361,28 @@ def main():
     today        = datetime.date.today()
     current_year = str(today.year)
     used_ids     = fetch_used_ids()
+    failures     = []
 
     # Fill any gaps from the past 3 days, and today itself, before generating tomorrow
     for offset in range(-3, 1):
         d = today + datetime.timedelta(days=offset)
         if not puzzle_exists(d.isoformat()):
             print(f"[CATCH-UP] Missing puzzle detected for {d} — filling in.")
-            generate_for_date(d.isoformat(), used_ids, current_year)
+            if not generate_for_date(d.isoformat(), used_ids, current_year):
+                failures.append(d.isoformat())
 
     # Generate tomorrow's puzzle
     tomorrow = today + datetime.timedelta(days=1)
     if puzzle_exists(tomorrow.isoformat()):
         print(f"[SKIP] Puzzle for {tomorrow} already exists — not overwriting.")
-        return
-    generate_for_date(tomorrow.isoformat(), used_ids, current_year)
+    elif not generate_for_date(tomorrow.isoformat(), used_ids, current_year):
+        failures.append(tomorrow.isoformat())
+
+    # Non-zero exit marks the Actions step failed, which triggers the Pushover
+    # alert step in daily_puzzle.yml (also fires on any unhandled crash, e.g.
+    # TMDB being unreachable — that raises before this point ever runs).
+    if failures:
+        raise SystemExit(f"Failed to generate puzzle(s) for: {', '.join(failures)}")
 
 if __name__ == "__main__":
     main()
