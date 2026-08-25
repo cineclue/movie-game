@@ -228,8 +228,9 @@ def actor_billing_in_movie(actor_id, movie_id):
 def find_actor_clue(answer_id, credits, exclude_ids, settings=DEFAULT_SETTINGS, lead_only=False):
     cast = [c for c in credits.get("cast", []) if c["id"] not in exclude_ids]
     cast.sort(key=lambda c: c.get("order", 99))
-    # lead pool is cast[:3]; start supporting pool after it so they don't compete for the same actor
-    pool = cast[:3] if lead_only else cast[3:10]
+    # lead pool is cast[:3]; supporting pool starts at 1 (not 3) so a second big name
+    # billed at position 1 or 2 isn't walled off just because the lead slot claimed position 0
+    pool = cast[:3] if lead_only else cast[1:10]
     pool = [c for c in pool if actor_is_recognizable(c["id"], settings)]
     for actor in pool:
         params = dict(with_cast=actor["id"],
@@ -272,25 +273,32 @@ def build_puzzle(movie, used_hint_ids=None, force=False, settings=DEFAULT_SETTIN
     genres  = details.get("genres", [])
 
     used_actor_ids = set()
-    clues = []
 
-    builders = [
-        lambda: find_year_clue(movie["id"], movie.get("release_date"), settings),
-        lambda: find_genre_clue(movie["id"], genres, settings),
-        lambda: find_actor_clue(movie["id"], credits, used_actor_ids, settings),           # supporting
-        lambda: find_actor_clue(movie["id"], credits, used_actor_ids, settings, lead_only=True),  # lead
-        lambda: find_director_clue(movie["id"], movie["id"], credits, settings),
-    ]
+    # Resolve the lead actor first so the supporting pick (which now overlaps cast[1:3])
+    # naturally excludes whichever top-3 actor the lead slot already claimed. Built in
+    # build_order but re-assembled in display_order so the supporting card still shows first.
+    build_order   = ["YEAR", "GENRE", "ACTOR_LEAD", "ACTOR_SUPPORTING", "DIRECTOR"]
+    display_order = ["YEAR", "GENRE", "ACTOR_SUPPORTING", "ACTOR_LEAD", "DIRECTOR"]
+    builders = {
+        "YEAR":             lambda: find_year_clue(movie["id"], movie.get("release_date"), settings),
+        "GENRE":            lambda: find_genre_clue(movie["id"], genres, settings),
+        "ACTOR_LEAD":       lambda: find_actor_clue(movie["id"], credits, used_actor_ids, settings, lead_only=True),
+        "ACTOR_SUPPORTING": lambda: find_actor_clue(movie["id"], credits, used_actor_ids, settings),
+        "DIRECTOR":         lambda: find_director_clue(movie["id"], movie["id"], credits, settings),
+    }
 
-    for build in builders:
-        clue = build()
+    resolved = {}
+    for slot in build_order:
+        clue = builders[slot]()
         if clue is None:
             return None
         # Avoid reusing the same hint movie across clues
         if clue["hint_tmdb_id"] in used_hint_ids:
             return None
         used_hint_ids.add(clue["hint_tmdb_id"])
-        clues.append(clue)
+        resolved[slot] = clue
+
+    clues = [resolved[slot] for slot in display_order]
 
     return {
         "answer_tmdb_id":  movie["id"],
