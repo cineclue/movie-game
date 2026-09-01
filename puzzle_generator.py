@@ -35,6 +35,7 @@ DEFAULT_SETTINGS = dict(
     min_vote_count=8000,          # answer + pool popularity floor
     hint_min_votes=5000,          # clue hint movies must clear this
     actor_min_known_movies=2,     # actor must appear in 2+ well-voted movies
+    min_actor_popularity=3,       # actor's own TMDB popularity score floor
     director_min_votes=100,       # director's other films must clear this
     max_hint_billing=10,          # actor must be top-N billed in the hint movie
     exclude_superhero=True,
@@ -46,18 +47,19 @@ DEFAULT_SETTINGS = dict(
 GENERATION_TIERS = [
     DEFAULT_SETTINGS,
     dict(DEFAULT_SETTINGS, min_vote_count=4000, hint_min_votes=2000,
-         actor_min_known_movies=2, director_min_votes=50, max_hint_billing=15,
-         pool_pages=25),
+         actor_min_known_movies=2, min_actor_popularity=2, director_min_votes=50,
+         max_hint_billing=15, pool_pages=25),
     dict(DEFAULT_SETTINGS, min_vote_count=1500, hint_min_votes=800,
-         actor_min_known_movies=1, director_min_votes=20, max_hint_billing=20,
-         exclude_superhero=False, exclude_franchise=False, pool_pages=30),
+         actor_min_known_movies=1, min_actor_popularity=1, director_min_votes=20,
+         max_hint_billing=20, exclude_superhero=False, exclude_franchise=False,
+         pool_pages=30),
     dict(DEFAULT_SETTINGS, min_vote_count=300, hint_min_votes=150,
-         actor_min_known_movies=1, director_min_votes=5, max_hint_billing=30,
-         exclude_superhero=False, exclude_franchise=False,
+         actor_min_known_movies=1, min_actor_popularity=0.3, director_min_votes=5,
+         max_hint_billing=30, exclude_superhero=False, exclude_franchise=False,
          exclude_current_year=False, pool_pages=30),
     dict(DEFAULT_SETTINGS, min_vote_count=0, hint_min_votes=0,
-         actor_min_known_movies=0, director_min_votes=0, max_hint_billing=9999,
-         exclude_superhero=False, exclude_franchise=False,
+         actor_min_known_movies=0, min_actor_popularity=0, director_min_votes=0,
+         max_hint_billing=9999, exclude_superhero=False, exclude_franchise=False,
          exclude_current_year=False, pool_pages=40),
 ]
 
@@ -231,7 +233,8 @@ def find_actor_clue(answer_id, credits, exclude_ids, settings=DEFAULT_SETTINGS, 
     # lead pool is cast[:3]; supporting pool starts at 1 (not 3) so a second big name
     # billed at position 1 or 2 isn't walled off just because the lead slot claimed position 0
     pool = cast[:3] if lead_only else cast[1:10]
-    pool = [c for c in pool if actor_is_recognizable(c["id"], settings)]
+    pool = [c for c in pool if c.get("popularity", 0) >= settings.get("min_actor_popularity", 0)
+            and actor_is_recognizable(c["id"], settings)]
     for actor in pool:
         params = dict(with_cast=actor["id"],
                       sort_by="vote_count.desc",
